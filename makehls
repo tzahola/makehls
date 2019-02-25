@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+segment_duration=10
+videos=()
+subtitles=()
+subtitle_languages=()
+subtitle_language_codes=()
+
+while (( $# > 0 )); do
+    case "$1" in
+        -h|--help)
+            echo 'makehls [(-i|--interval) segment_duration] ((-s|--subtitle) subtitle_file subtitle_language_name subtitle_language_code) ...  (-o|--output) output_dir video_file ...'
+            echo 'Example:'
+            echo 'makehls -o test -s subtitles.srt English en -s subtitles_de.srt Deutsch de -s subtitles_es.srt Espanol es video.mp4'
+            exit 0
+            ;;
+        -s|--subtitle)
+            shift
+            subtitles+=("$1"); shift
+            subtitle_languages+=("$1"); shift
+            subtitle_language_codes+=("$1"); shift
+            ;;
+        -o|--output)
+            shift
+            output="$1"; shift
+            ;;
+        -i|--interval)
+            shift
+            segment_duration="$1"; shift
+            ;;
+        *)
+            while (( $# > 0)); do
+                videos+=("$1")
+                shift
+            done
+            break
+            ;;
+    esac
+done
+
+if [[ "${output:-}" == "" ]]; then
+    echo "output_dir missing!"
+    exit 1
+elif [[ ${#videos[@]} == 0 ]]; then
+    echo "No video file was specified!"
+    exit 2
+fi
+
+if ! [[ -d "$output" ]]; then
+    mkdir -p "$output" || { echo "Failed to create output_dir '$output_dir'"; exit 3; }
+fi
+
+for (( i=0; i < ${#videos[@]}; i++ )); do
+    mediafilesegmenter -z none -t "$segment_duration" -f "$output" -B "video_$i" -i "video_$i.m3u8" "${videos[$i]}"
+done
+
+for (( i=0; i < ${#subtitles[@]}; i++ )); do
+    mediasubtitlesegmenter -t "$segment_duration" -f "$output" -B "${subtitle_language_codes[$i]}" -i "${subtitle_language_codes[$i]}.m3u8" "${subtitles[$i]}" 
+done
+
+{
+    printf '#EXTM3U\n'
+    for (( i=0; i < ${#subtitles[@]}; i++ )); do
+        if (( $i == 0 )); then
+            is_default='YES'
+        else
+            is_default='NO'
+        fi
+        printf '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subtitles",NAME="%s",DEFAULT=%s,AUTOSELECT=YES,FORCED=NO,LANGUAGE="%s",URI="%s"\n' \
+            "${subtitle_languages[$i]}" "$is_default" "${subtitle_language_codes[$i]}" "${subtitle_language_codes[$i]}.m3u8"
+    done
+
+    if (( ${#subtitles[@]} > 0 )); then
+        has_subtitles=',SUBTITLES="subtitles"'
+    else
+        has_subtitles=''
+    fi
+
+    for (( i=0; i < ${#videos[@]}; i++ )); do
+        ffprobe_info="$(ffprobe -show_streams -print_format json "${videos[$i]}")"
+        bitrate="$(echo "$ffprobe_info" | jq --raw-output '.streams[0].bit_rate')"
+        width="$(echo "$ffprobe_info" | jq --raw-output '.streams[0].width')"
+        height="$(echo "$ffprobe_info" | jq --raw-output '.streams[0].height')"
+        printf '#EXT-X-STREAM-INF:BANDWIDTH=%s,RESOLUTION=%sx%s%s\n' "$bitrate" "$width" "$height" "$has_subtitles"
+        printf "video_$i.m3u8\n"
+    done
+} >"$output/index.m3u8"
